@@ -63,12 +63,31 @@ A bonus finding: the volume buttons are processed **entirely inside the headset*
 
 ## Workaround (no software, reversible, tested)
 
-Disable the adapter's HID interface so Windows never polls the malformed endpoint:
+Disable the adapter's HID interface so Windows never polls the malformed endpoint. The adapter has exactly one HID interface (interface 3, "MI_03" in its hardware ID), so there is only one correct target. Close Sony's "PlayStation Link" app first if it is running (it holds the device open and makes the disable fail).
 
-1. Device Manager → Human Interface Devices → the "USB Input Device" belonging to `VID_054C&PID_0ECC&MI_03` (check Details → Hardware Ids) → **Disable device**. Or, from an elevated prompt: `pnputil /disable-device "<instance id of the MI_03 child>"`.
-2. Audio keeps working (different interface, untouched). Volume buttons keep working (handled in-headset). The freeze mechanism is physically eliminated.
-3. Costs while disabled: Sony's PC app can't see the device (no sidetone/EQ changes, no battery readout, no firmware updates). Re-enable the device temporarily to change those, then disable again.
-4. Survives reboots. A different adapter unit (different serial) needs the disable applied once again.
+**Option A — Device Manager (easiest to get right):**
+
+1. Open Device Manager (`devmgmt.msc`) → menu **View → Devices by container**.
+2. Expand the **"PlayStation Link Adapter"** container. You'll see the audio entries plus one **"USB Input Device"**.
+3. Right-click that "USB Input Device" → **Disable device**.
+
+(If you prefer the default view: it's under Human Interface Devices, among possibly many identical "USB Input Device" entries. Pick the one whose Properties → Details → **Hardware Ids** shows `USB\VID_054C&PID_0ECC&MI_03`. The "MI_03" never appears in the device's display name, only in that property.)
+
+**Option B — PowerShell as Administrator (finds it by ID, no ambiguity):**
+
+```powershell
+Stop-Process -Name 'PlayStation Link' -Force -ErrorAction SilentlyContinue
+Get-PnpDevice | Where-Object InstanceId -like 'USB\VID_054C&PID_0ECC&MI_03*' |
+    Disable-PnpDevice -Confirm:$false
+```
+
+To undo either option later, right-click → Enable device, or run the same PowerShell with `Enable-PnpDevice`.
+
+Results and costs:
+
+- Audio keeps working (different interface, untouched). Volume buttons keep working (handled in-headset). The freeze mechanism is physically eliminated.
+- While disabled, Sony's PC app can't see the device (no sidetone/EQ changes, no battery readout, no firmware updates). Re-enable temporarily to change those, then disable again.
+- Survives reboots. A different adapter unit (different serial) needs the disable applied once again.
 
 ## Reproduction (for anyone who wants to verify)
 

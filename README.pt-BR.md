@@ -63,12 +63,31 @@ Achado bônus: os botões de volume são processados **inteiramente dentro do he
 
 ## Workaround (sem software, reversível, testado)
 
-Desabilite a interface HID do adaptador, pra que o Windows nunca faça poll do endpoint malformado:
+Desabilite a interface HID do adaptador, pra que o Windows nunca faça poll do endpoint malformado. O adaptador tem exatamente uma interface HID (interface 3, "MI_03" no hardware ID), então só existe um alvo correto. Feche o app "PlayStation Link" da Sony antes, se estiver rodando (ele segura o dispositivo aberto e faz o disable falhar).
 
-1. Gerenciador de Dispositivos → Dispositivos de Interface Humana → o "Dispositivo de Entrada USB" pertencente a `VID_054C&PID_0ECC&MI_03` (confira em Detalhes → IDs de Hardware) → **Desabilitar dispositivo**. Ou, em prompt elevado: `pnputil /disable-device "<instance id do filho MI_03>"`.
-2. O áudio continua funcionando (outra interface, intocada). Os botões de volume continuam funcionando (processados no headset). O mecanismo do freeze é fisicamente eliminado.
-3. Custos enquanto desabilitado: o app da Sony não enxerga o device (sem ajustes de sidetone/EQ, sem leitura de bateria, sem update de firmware). Reabilite temporariamente pra mudar essas coisas, e desabilite de novo.
-4. Sobrevive a reboots. Outro adaptador (serial diferente) precisa do disable aplicado mais uma vez.
+**Opção A — Gerenciador de Dispositivos (a mais fácil de acertar):**
+
+1. Abra o Gerenciador de Dispositivos (`devmgmt.msc`) → menu **Exibir → Dispositivos por contêiner**.
+2. Expanda o contêiner **"PlayStation Link Adapter"**. Você verá as entradas de áudio e um único **"Dispositivo de Entrada USB"**.
+3. Clique com o direito nesse "Dispositivo de Entrada USB" → **Desabilitar dispositivo**.
+
+(Se preferir a visualização padrão: ele fica em Dispositivos de Interface Humana, no meio de possivelmente vários "Dispositivo de Entrada USB" idênticos. Escolha aquele cujas Propriedades → Detalhes → **IDs de Hardware** mostram `USB\VID_054C&PID_0ECC&MI_03`. O "MI_03" nunca aparece no nome de exibição do dispositivo, só nessa propriedade.)
+
+**Opção B — PowerShell como Administrador (acha pelo ID, sem ambiguidade):**
+
+```powershell
+Stop-Process -Name 'PlayStation Link' -Force -ErrorAction SilentlyContinue
+Get-PnpDevice | Where-Object InstanceId -like 'USB\VID_054C&PID_0ECC&MI_03*' |
+    Disable-PnpDevice -Confirm:$false
+```
+
+Pra desfazer qualquer uma das opções depois: clique direito → Habilitar dispositivo, ou o mesmo PowerShell com `Enable-PnpDevice`.
+
+Resultados e custos:
+
+- O áudio continua funcionando (outra interface, intocada). Os botões de volume continuam funcionando (processados no headset). O mecanismo do freeze é fisicamente eliminado.
+- Enquanto desabilitado, o app da Sony não enxerga o device (sem ajustes de sidetone/EQ, sem leitura de bateria, sem update de firmware). Reabilite temporariamente pra mudar essas coisas, e desabilite de novo.
+- Sobrevive a reboots. Outro adaptador (serial diferente) precisa do disable aplicado mais uma vez.
 
 ## Reprodução (pra quem quiser verificar)
 
