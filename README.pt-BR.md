@@ -115,6 +115,8 @@ Resultados e custos:
 
 Enquadrar corretamente as transferências do interrupt IN: entregar o report 0xB0 como uma única transferência de ≤64 bytes por poll (ou declarar `wMaxPacketSize`/tamanho de report maiores de forma consistente). Descrição de uma linha; só firmware; sem mudança de hardware. Corrigir o endpoint de feedback ausente também seria bem-vindo.
 
+Vale notar o quão dispensável é a transferência problemática: o mesmo estado 0xB0 (botões, volume, mute do mic) **também** é servido pelo control endpoint via `GET_REPORT(Feature 0xB0)` — é assim que o próprio app de PC da Sony lê o estado, com poll a ~5 Hz. A rajada malformada de 256 bytes no interrupt é uma notificação redundante da qual nada essencial depende. Dava pra dimensioná-la corretamente, ou removê-la por completo, sem perder função nenhuma.
+
 ## Sinais de que o port pra PC foi baixa prioridade
 
 Nenhum destes é o bug — o bug é o babble lá em cima. Mas, juntos, sugerem que o lado Windows recebeu pouca atenção, o que dá contexto pra como algo tão reproduzível foi parar em produção:
@@ -168,6 +170,19 @@ A morte, capturada ao vivo (playback WASAPI exclusivo; segundo aperto de volume 
 194.902  EP 0x81 interrupt re-submetido … nunca mais completa
 Erro do player: "Unrecoverable playback error: Waiting for hardware timed out"
 Canal de glitches do Windows: zero eventos (motor de áudio não envolvido)
+```
+
+Re-captura independente (uma sessão posterior, sem áudio tocando) — o babble é determinístico entre sessões. Aqui ele disparou uma vez, no momento em que o headset associou ao adaptador (mudança de estado do dispositivo), e foi inofensivo porque não havia stream ativo:
+
+```
+72.640  EP 0x81 interrupt IN  cpl  status=C0000012 (BABBLE_DETECTED)  len=256
+72.641  EP 0x81               cpl  status=C0010000 (CANCELED)         len=0
+72.641  URB_FUNCTION_ABORT_PIPE (EP 0x81)
+72.830  URB_FUNCTION_ABORT_PIPE / reset (EP 0x81)
+        ...depois o EP 0x81 ficou mudo pelos ~130 s restantes, com o headset conectado.
+        Durante toda a captura, o host fez poll de GET_REPORT(Feature 0xB0) no control
+        endpoint a ~5 Hz constantes — é esse poll de controle, não o endpoint de
+        interrupt, que a operação normal de fato usa.
 ```
 
 Declarações dos endpoints (dos descriptors do próprio dispositivo, configuration ativa):

@@ -115,6 +115,8 @@ Results and costs:
 
 Frame the interrupt IN transfers correctly: deliver the 0xB0 input report as a single ≤64-byte transfer per poll (or declare a larger `wMaxPacketSize`/report size consistently). One-line description; firmware-only; no hardware change needed. Fixing the missing async feedback endpoint would be nice too.
 
+Worth noting how low-stakes the offending transfer is: the same 0xB0 state (buttons, volume, mic-mute) is **also** served over the control endpoint via `GET_REPORT(Feature 0xB0)`, which is how Sony's own PC app actually reads it — polling at ~5 Hz. The malformed 256-byte interrupt burst is a redundant push-notification that nothing load-bearing depends on. It could be sized correctly, or dropped entirely, without losing any function.
+
 ## Corroborating signs this was a low-priority PC port
 
 None of these are the bug — the bug is the babble above. But taken together they suggest the Windows side did not get much attention, which is context for how something this reproducible shipped:
@@ -168,6 +170,19 @@ The kill, captured live (WASAPI exclusive playback; second volume press of the r
 194.902  EP 0x81 interrupt re-submitted … never completes again
 Player error: "Unrecoverable playback error: Waiting for hardware timed out"
 Windows glitch channel: zero events (audio engine not involved)
+```
+
+Independent re-capture (a later session, no audio playing) — the babble is deterministic across sessions. Here it fired once, at the moment the headset associated with the adapter (device state change), and was harmless because no stream was active:
+
+```
+72.640  EP 0x81 interrupt IN  cpl  status=C0000012 (BABBLE_DETECTED)  len=256
+72.641  EP 0x81               cpl  status=C0010000 (CANCELED)         len=0
+72.641  URB_FUNCTION_ABORT_PIPE (EP 0x81)
+72.830  URB_FUNCTION_ABORT_PIPE / reset (EP 0x81)
+        ...then EP 0x81 stayed silent for the remaining ~130 s while the headset stayed connected.
+        Throughout the whole capture, the host polled GET_REPORT(Feature 0xB0) on the control
+        endpoint at a steady ~5 Hz — that control poll, not the interrupt endpoint, is what
+        normal operation actually relies on.
 ```
 
 Endpoint declarations (from the device's own descriptors, active configuration):
