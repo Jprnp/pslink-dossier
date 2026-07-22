@@ -101,6 +101,21 @@ Resultados e custos:
 
 Enquadrar corretamente as transferências do interrupt IN: entregar o report 0xB0 como uma única transferência de ≤64 bytes por poll (ou declarar `wMaxPacketSize`/tamanho de report maiores de forma consistente). Descrição de uma linha; só firmware; sem mudança de hardware. Corrigir o endpoint de feedback ausente também seria bem-vindo.
 
+## Sinais de que o port pra PC foi baixa prioridade
+
+Nenhum destes é o bug — o bug é o babble lá em cima. Mas, juntos, sugerem que o lado Windows recebeu pouca atenção, o que dá contexto pra como algo tão reproduzível foi parar em produção:
+
+- **O firmware viola a spec USB em dois lugares independentes.** O endpoint interrupt de 64 bytes que transmite 256 (o freeze), e o endpoint async de saída de áudio que vem sem endpoint de feedback nenhum (`bSynchAddress = 0`, sem feedback explícito nem implícito), que a USB 2.0 §5.12.4.2 exige pra sinks assíncronos. Os dois são visíveis nos próprios descriptors do dispositivo.
+- **O pacote de driver assinado (WHQL) ainda carrega um comentário de teste de desenvolvedor.** No Extension INF da Sony (`PlayStationLink.inf`), logo acima da linha que define o friendly name do dispositivo:
+  ```
+  [Dev_AddReg]
+  ; Just to test that it installed
+  HKR,,FriendlyName,, "PlayStation Link"
+  ```
+  Um "só pra testar" esquecido é inofensivo, mas não é o tipo de coisa que se espera sobreviver até um release de produção assinado, distribuído a todo usuário de PC via Windows Update.
+
+Pra ser justo, o mesmo pacote acerta em algumas coisas (`DriverIsolation`, `PnpLockDown`). O ponto não é que a Sony seja incompetente; é que o port pra PC parece ter sido validado de leve — consistente com um dispositivo projetado pro PS5, onde a Sony controla o host e nada disso apareceria.
+
 ---
 
 ## A trajetória da investigação (como chegamos aqui)
