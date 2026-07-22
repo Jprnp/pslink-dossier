@@ -1,0 +1,141 @@
+# Adaptador PS Link da Sony mata o áudio do Windows: causa raiz encontrada (violação do protocolo USB), com correção
+
+*Read this in [English](README.md).*
+
+> [!NOTE]
+> **Transparência sobre IA:** eu não sou especialista em protocolo USB, stack de áudio nem análise de firmware. Este trabalho está muito além da minha profundidade técnica pessoal. Tanto a investigação quanto este dossiê foram feitos com ajuda de LLMs (Claude Opus 4.8 e Claude Fable 5, da Anthropic). Elas conduziram a metodologia, o ferramental e a análise, enquanto eu operava o hardware e tomava as decisões. Não confie em nenhum de nós de graça: toda afirmação aqui é sustentada por capturas e experimentos reproduzíveis, então verifique.
+
+> [!IMPORTANT]
+> ### A parte humana desta história
+> Minha contribuição de verdade aqui foi curiosidade e teimosia. O suporte da PlayStation disse que era "um problema do Windows" e encerrou o caso. Mais tarde descobri que as LLMs também desistiam se eu deixasse: mais de uma vez elas concluíram que se a Sony não atualizar o firmware não tem o que fazer, e sugeriram que eu aceitasse um watchdog de recuperação automática como resposta final. Precisei insistir bastante pra investigação continuar depois disso, e a causa raiz deste documento foi encontrada porque ela continuou.
+>
+> A evidência sempre esteve no barramento, acessível a qualquer um com as ferramentas certas. Só precisava de alguém disposto a continuar perguntando.
+
+**TL;DR:** Se o seu headset PULSE Elite / PULSE Explore (via adaptador USB PS Link) mata TODO o áudio do Windows aleatoriamente — principalmente ao mudar o volume — não é seu driver, não é a Realtek, não é o Windows. O firmware do adaptador viola a spec USB: transmite **rajadas de 256 bytes num endpoint interrupt que ele mesmo declarou como máximo de 64 bytes**. O Windows detecta isso como **babble** (`USBD_STATUS_BABBLE_DETECTED`), reseta o pipe, e quando há áudio tocando, essa recuperação de erro derruba o stream junto — escalando até o travamento completo do `audiodg.exe`. **Workaround abaixo (sem software nenhum) — o áudio fica estável e os botões de volume continuam funcionando.**
+
+- Dispositivo: adaptador USB PlayStation Link, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (o mais recente até a data)
+- Host: Windows 11 (build 26200), somente drivers inbox da Microsoft (`usbaudio.sys` + `HidUsb`) — o app da Sony pra PC NÃO participa da falha (verificado: o freeze reproduz com ele morto)
+- Evidência: capturas de barramento USB (USBPcap), traces ETW de áudio, dump do `audiodg.exe` travado e experimentos A/B controlados. Capturas cruas disponíveis a quem pedir (serial do device redigido).
+
+> **Nota sobre o suporte PlayStation:** eu contatei o suporte da PlayStation sobre esses travamentos muito antes de qualquer análise daqui existir. O caso foi descartado como *"um problema do Windows"* e o suporte foi negado — nenhum caminho de escalonamento foi oferecido. Tudo abaixo existe porque essa porta se fechou. Como as capturas mostram, não é um problema do Windows: o Windows é o lado que detecta e recupera corretamente a violação de protocolo do dispositivo.
+
+---
+
+## Sintoma
+
+Com áudio tocando pelo adaptador PS Link, o áudio do Windows morre no sistema inteiro: todo app fica mudo, o slider de volume mexe mas nada toca, e só matar o `audiodg.exe` (ou reiniciar os serviços de áudio / alternar qualquer efeito que reconstrua o grafo de áudio) traz o som de volta. Gatilhos: mudar o volume no headset, mutar o mic, mexer em qualquer slider do app da Sony — mas também acontece "espontaneamente" só reproduzindo áudio. No meu caso: mediana de ~7 minutos entre travamentos em uso ativo (48 travamentos numa sessão de ~7 h, todos logados).
+
+Buscas mostram relatos espalhados de "áudio do Pulse Elite caindo a cada poucos segundos no PC" que batem com a forma mais leve dessa falha. A maioria culpa o Windows ou os drivers e segue a vida. O mecanismo abaixo explica a forma leve e a grave.
+
+## Causa raiz (capturada no barramento)
+
+O adaptador é um dispositivo USB composto Full-Speed: uma função de áudio (interfaces 0–2, USB Audio Class 1.0 padrão, driver inbox `usbaudio.sys` da Microsoft) e uma função HID (interface 3, driver inbox `HidUsb`). A interface HID declara um endpoint interrupt IN 0x81 com `wMaxPacketSize = 64`, e seu maior input report (ID 0xB0) com 64 bytes.
+
+**Toda vez que o estado do headset muda** — botão de volume, mute do mic, slider de sidetone, preset de EQ (cada um atualiza o report de estado 0xB0 de 64 bytes) — **o firmware empurra uma rajada de 256 bytes (4 cópias idênticas concatenadas do report 0xB0) por esse endpoint de 64 bytes.**
+
+Isso é violação dura do protocolo USB, e o host marca exatamente assim:
+
+```
+completion do interrupt IN, EP 0x81, tamanho=256, USBD_STATUS = 0xC0000012 (BABBLE_DETECTED)
+→ URB pendente cancelada (0xC0010000)
+→ URB_FUNCTION_ABORT_PIPE
+→ URB_FUNCTION_SYNC_RESET_PIPE_AND_CLEAR_STALL
+```
+
+Capturei essa sequência idêntica **9 vezes numa única sessão** — uma por aperto de botão / movimento de slider, deterministicamente.
+
+**Por que mata o áudio:** sem áudio tocando, a recuperação (abort/reset) é inofensiva (as 9 ocorrências acima não tiveram efeito audível — o stream de áudio estava fechado na hora). Mas quando o stream isócrono **está** ativo no mesmo dispositivo Full-Speed, a recuperação do babble desorganiza o serviço USB do device e o stream de áudio para de completar:
+
+- Em modo WASAPI **exclusivo** (motor de áudio do Windows fora do caminho): o player morre com *"Unrecoverable playback error: Waiting for hardware timed out"* — capturei um babble no **segundo exato** do aperto de botão que matou o stream, seguido ~2 s depois pelo teardown do stream (`SET_INTERFACE alt 0`). O canal de eventos de glitch do Windows registrou **zero** eventos — provando que a falha acontece abaixo do motor de áudio.
+- Em modo **compartilhado** normal: o stream estagnado aparece como `KS "BASE Output Unexpected Buffer Completed"`, depois uma tempestade de ~130 glitches/s (`Microsoft-Windows-Audio/GlitchDetection`), e as threads do `audiodg.exe` entram em deadlock — o travamento do sistema inteiro.
+
+Isso também explica os travamentos "espontâneos" (o device atualiza o report de estado sozinho de vez em quando — ex.: nível de bateria — emitindo a mesma rajada malformada) e por que os botões parecem "gatilhos certeiros" (cada aperto emite uma).
+
+**Confirmação por eliminação (A/B):** com a interface HID desabilitada no host (ver workaround) — o pipe interrupt nunca é pollado e o device fisicamente não consegue transmitir a rajada — o freeze ficou **irreprodutível** sob a mesma martelada de botões que antes matava o áudio em 1–3 minutos, de forma confiável. Testado com playback exclusivo contínuo.
+
+Violação de spec secundária, por completude: o endpoint isócrono de SAÍDA de áudio é declarado **assíncrono** mas não fornece **nenhum endpoint de feedback** (nem explícito, nem implícito; `bSynchAddress = 0`), que a USB 2.0 §5.12.4.2 exige para sinks assíncronos. Não é o gatilho aqui, mas indica o nível de conformidade USB do firmware.
+
+**Atribuição de culpa:** o dispositivo viola a spec; o Windows detecta a violação e recupera o pipe conforme o manual. A única coisa discutivelmente do lado da Microsoft é a severidade — a tempestade de glitches escalar pra deadlock do `audiodg` em vez de um restart gracioso do stream. O firmware presumivelmente foi projetado contra o host stack da própria Sony (PS5 / PlayStation Portal), onde ninguém cobra a declaração HID — no Windows, o driver de classe inbox cobra.
+
+## Por que os botões continuam funcionando sem nada disso
+
+Achado bônus: os botões de volume são processados **inteiramente dentro do headset** (o DSP dele aplica o nível localmente; o report de estado só informa o host). O app da Sony pra PC apenas espelha esse estado no slider de volume do Windows. Ou seja: o workaround abaixo NÃO sacrifica os botões de volume.
+
+## Workaround (sem software, reversível, testado)
+
+Desabilite a interface HID do adaptador, pra que o Windows nunca faça poll do endpoint malformado:
+
+1. Gerenciador de Dispositivos → Dispositivos de Interface Humana → o "Dispositivo de Entrada USB" pertencente a `VID_054C&PID_0ECC&MI_03` (confira em Detalhes → IDs de Hardware) → **Desabilitar dispositivo**. Ou, em prompt elevado: `pnputil /disable-device "<instance id do filho MI_03>"`.
+2. O áudio continua funcionando (outra interface, intocada). Os botões de volume continuam funcionando (processados no headset). O mecanismo do freeze é fisicamente eliminado.
+3. Custos enquanto desabilitado: o app da Sony não enxerga o device (sem ajustes de sidetone/EQ, sem leitura de bateria, sem update de firmware). Reabilite temporariamente pra mudar essas coisas, e desabilite de novo.
+4. Sobrevive a reboots. Outro adaptador (serial diferente) precisa do disable aplicado mais uma vez.
+
+## Reprodução (pra quem quiser verificar)
+
+1. Toque áudio contínuo pelo adaptador PS Link (qualquer modo; WASAPI exclusivo torna a morte legível como um erro limpo do player).
+2. Aperte volume +/− no headset repetidamente (a cada ~10 s). Tempo-até-travar típico aqui: menos de 3 minutos.
+3. Pra prova no nível do fio: capture com USBPcap no root hub do adaptador durante o passo (2); filtre o endereço do device; observe completions `0xC0000012` (256 bytes) no EP 0x81 a cada aperto, e correlacione a morte do áudio com uma delas. (Nota: o USBPcap não capturou pacotes isócronos no meu sistema — não é necessário; a sequência babble + reset do pipe e a correlação temporal aparecem mesmo assim.)
+4. Depois desabilite o filho HID MI_03 e repita o passo (2) — o freeze não deve reproduzir.
+
+## O que a Sony deveria corrigir
+
+Enquadrar corretamente as transferências do interrupt IN: entregar o report 0xB0 como uma única transferência de ≤64 bytes por poll (ou declarar `wMaxPacketSize`/tamanho de report maiores de forma consistente). Descrição de uma linha; só firmware; sem mudança de hardware. Corrigir o endpoint de feedback ausente também seria bem-vindo.
+
+---
+
+## A trajetória da investigação (como chegamos aqui)
+
+Isso não foi achado numa tarde. A trilha, em ordem — incluindo as curvas erradas, porque elas fazem parte da evidência:
+
+1. **Maio/2026 — primeiro mergulho.** Depois de meses de travamentos: tracing ETW de áudio + dump de memória do `audiodg.exe` travado. Achada a assinatura da falha (`BASE Output Unexpected Buffer Completed` → tempestade de glitches → threads do motor em deadlock). Primeiro suspeito — os efeitos de áudio da Realtek (APOs) — **inocentado**: removê-los não mudou nada (desabilitar efeitos só "consertava" porque reconstrói o grafo de áudio, que é o que qualquer recuperação faz). Suporte da PlayStation contatado; caso descartado como "problema do Windows"; suporte negado.
+2. **Maio–julho/2026 — a era do band-aid.** Construí um watchdog que detecta a tempestade de glitches e reinicia o motor de áudio automaticamente (~1 s de recuperação). Foram quatro gerações (polling do canal de eventos; imunidade a saltos do relógio do sistema; hotkey global pra freezes que o canal nem loga; fallback de restart de serviço pra quando o próprio `audiosrv` trava). Tornou a vida suportável — mediana de ~7 minutos entre travamentos em uso ativo — mas é recuperação, não cura.
+3. **21/jul — reconhecimento completo do adaptador.** Dump fresco dos descriptors USB (todas as interfaces/endpoints, as duas configurations), o report descriptor HID completo de 951 bytes, e a decodificação ao vivo do protocolo HID vendor: report de estado `0xB0` (bitfield dos botões, nível de volume do headset 0–13, estado do mute do mic), report de config `0xD0` (nível de sidetone, presets de EQ), confirmados byte a byte no barramento. Descoberto que o app da Sony nunca recebe *input reports* dos botões — ele faz polling de `GET_REPORT(0xB0)` ~4×/s. Primeiro avistamento das rajadas malformadas de 256 bytes no interrupt — anotadas como curiosidade, ainda não entendidas como a arma do crime.
+4. **Resultado negativo chave:** matar o app da Sony inteiro **não** parou os travamentos. Isso inocentou o *software* da Sony e toda ideia de mitigação tipo "higienizar o tráfego" — o problema tinha que morar no device ou abaixo dele.
+5. **Hipótese de clock drift.** O dump dos descriptors mostrou que o endpoint async de saída de áudio **não tem endpoint de feedback nenhum** (violação de spec) — cenário estrutural de drift de clock, e por um tempo a teoria líder. Explicava os travamentos passivos e a "janela de graça" pós-recuperação. Estava errada sobre o mecanismo principal, mas motivou o experimento decisivo.
+6. **22/jul — a noite decisiva.** Playback WASAPI exclusivo (motor de áudio fora do caminho) morreu num aperto de volume em menos de um minuto — com o canal de glitches do Windows **completamente silencioso**. Captura de barramento da morte seguinte: `BABBLE_DETECTED` no EP 0x81 no segundo exato do aperto fatal. Re-análise da captura do dia anterior: a mesma sequência babble + abort/reset em **todo** evento de botão/slider — inofensiva na época, porque não havia áudio tocando. Confirmação final: com a interface HID desabilitada (pipe interrupt nunca pollado → babble fisicamente impossível), a martelada de botões não conseguiu mais matar o áudio — e os botões de volume continuaram funcionando, revelando que sempre foram processados dentro do headset.
+7. **Janela de graça explicada:** depois de cada crash, o pipe babbleado fica morto até o driver HID reabri-lo; enquanto está morto, sem IN tokens → sem babble possível → botões "seguros" por alguns segundos. Todo comportamento observado agora tem um único mecanismo.
+
+Ferramentas: USBPcap + Wireshark, UsbTreeView, ETW do Windows (`Microsoft-Windows-Audio/GlitchDetection`), WinDbg (análise de dump), Python (parsers próprios de pcap/USBPcap, enumeração HID e teste de acesso via ctypes, monitoramento Core Audio via pycaw).
+
+## Apêndice — evidências-chave capturadas
+
+Sequência de babble numa mudança de estado (repetida identicamente em todo evento de botão/slider; timestamps relativos ao início da captura):
+
+```
+48.736  EP 0x81 interrupt IN  cpl  status=C0000012 (BABBLE_DETECTED)  len=256
+        payload: b0 50 01 4e b4 be 1a bf ... (4x o report 0xB0 de 64 bytes)
+48.737  EP 0x81               cpl  status=C0010000 (CANCELED)         len=0
+48.737  URB_FUNCTION_ABORT_PIPE (EP 0x81)
+48.934  URB_FUNCTION_SYNC_RESET_PIPE_AND_CLEAR_STALL (EP 0x81)
+```
+
+A morte, capturada ao vivo (playback WASAPI exclusivo; segundo aperto de volume da rodada):
+
+```
+189.897  EP 0x81 interrupt IN  cpl  status=C0000012  len=256   ← o babble (= o aperto do botão)
+189.897  EP 0x81               cpl  status=C0010000  len=0
+189.897  ABORT_PIPE / 190.087 RESET_PIPE_AND_CLEAR_STALL
+191.942  SET_INTERFACE(if=2, alt=0)                            ← stream de áudio desmontado (~timeout do player)
+194.902  EP 0x81 interrupt re-submetido … nunca mais completa
+Erro do player: "Unrecoverable playback error: Waiting for hardware timed out"
+Canal de glitches do Windows: zero eventos (motor de áudio não envolvido)
+```
+
+Declarações dos endpoints (dos descriptors do próprio dispositivo, configuration ativa):
+
+```
+EP 0x81  interrupt IN   wMaxPacketSize=64   ← o endpoint babbleado
+EP 0x0C  iso OUT  async wMaxPacketSize=196  bSynchAddress=0, nenhum EP de feedback
+EP 0x8C  iso IN   sync  wMaxPacketSize=96
+Report HID 0xB0 (input): declarado 64 bytes  ← entregue com 256
+```
+
+Assinatura da falha em modo compartilhado (ETW, do diagnóstico de maio do mesmo freeze):
+
+```
+KS Endpoint Glitch: BASE Output Unexpected Buffer Completed
+→ ~130 eventos de glitch/s (Microsoft-Windows-Audio/GlitchDetection, IDs 38/40/41)
+→ threads do audiodg.exe estacionadas (WaitForMultipleObjectsEx / EventPairLow) — áudio do sistema morto
+```
+
+*As capturas pcap completas, os traces ETW, o dump do audiodg e o dump do report descriptor HID existem e podem ser compartilhados (serial do dispositivo redigido). Feliz em responder perguntas ou ajudar alguém a reproduzir.*
