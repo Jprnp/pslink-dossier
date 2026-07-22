@@ -13,7 +13,7 @@
 
 **TL;DR:** Se o seu headset PULSE Elite / PULSE Explore (via adaptador USB PS Link) mata TODO o áudio do Windows aleatoriamente — principalmente ao mudar o volume — não é seu driver, não é a Realtek, não é o Windows. O firmware do adaptador viola a spec USB: transmite **rajadas de 256 bytes num endpoint interrupt que ele mesmo declarou como máximo de 64 bytes**. O Windows detecta isso como **babble** (`USBD_STATUS_BABBLE_DETECTED`), reseta o pipe, e quando há áudio tocando, essa recuperação de erro derruba o stream junto — escalando até o travamento completo do `audiodg.exe`. **Workaround abaixo (sem software nenhum) — o áudio fica estável e os botões de volume continuam funcionando.**
 
-- Dispositivo: adaptador USB PlayStation Link, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (o mais recente até a data)
+- Dispositivo: adaptador USB PlayStation Link, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (`REV_0143`, o mais recente até a data). **Todos os achados deste documento foram capturados especificamente no firmware 1.43** — outras versões podem ou não se comportar igual. Pra conferir o seu: Gerenciador de Dispositivos → entrada "PlayStation Link" do adaptador → Propriedades → Detalhes → IDs de Hardware → o sufixo `REV_xxxx` é o firmware (ex.: `USB\VID_054C&PID_0ECC&REV_0143`). Se o seu for outra versão, relatos em qualquer direção são muito bem-vindos.
 - Host: Windows 11 (build 26200), somente drivers inbox da Microsoft (`usbaudio.sys` + `HidUsb`) — o app da Sony pra PC NÃO participa da falha (verificado: o freeze reproduz com ele morto)
 - Evidência: capturas de barramento USB (USBPcap), traces ETW de áudio, dump do `audiodg.exe` travado e experimentos A/B controlados. Capturas cruas disponíveis a quem pedir (serial do device redigido).
 
@@ -91,6 +91,7 @@ Resultados e custos:
 
 ## Reprodução (pra quem quiser verificar)
 
+0. Confira a versão do seu firmware primeiro (ver a nota do `REV_xxxx` no topo). Tudo abaixo foi verificado no **1.43**; uma versão diferente pode não reproduzir, e saber quais versões reproduzem ou não já é dado valioso por si só.
 1. Toque áudio contínuo pelo adaptador PS Link (qualquer modo; WASAPI exclusivo torna a morte legível como um erro limpo do player).
 2. Aperte volume +/− no headset repetidamente (a cada ~10 s). Tempo-até-travar típico aqui: menos de 3 minutos.
 3. Pra prova no nível do fio: capture com USBPcap no root hub do adaptador durante o passo (2); filtre o endereço do device; observe completions `0xC0000012` (256 bytes) no EP 0x81 a cada aperto, e correlacione a morte do áudio com uma delas. (Nota: o USBPcap não capturou pacotes isócronos no meu sistema — não é necessário; a sequência babble + reset do pipe e a correlação temporal aparecem mesmo assim.)

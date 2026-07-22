@@ -13,7 +13,7 @@
 
 **TL;DR:** If your PULSE Elite / PULSE Explore headset (via the PS Link USB adapter) randomly kills ALL Windows audio — especially when changing volume — it is not your drivers, not Realtek, not Windows. The adapter's firmware violates the USB spec: it transmits **256-byte bursts on an interrupt endpoint it declared as 64-byte max**. Windows detects this as **babble** (`USBD_STATUS_BABBLE_DETECTED`), resets the pipe, and when audio is streaming, that error recovery takes the audio stream down with it — cascading into a full `audiodg.exe` lockup. **Workaround below (no software needed) — audio becomes stable and the volume buttons keep working.**
 
-- Device: PlayStation Link USB adapter, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (latest at time of writing)
+- Device: PlayStation Link USB adapter, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (`REV_0143`, latest at time of writing). **Every finding in this document was captured on firmware 1.43 specifically** — other versions may or may not behave the same. To check yours: Device Manager → the adapter's "PlayStation Link" entry → Properties → Details → Hardware Ids → the `REV_xxxx` suffix is the firmware (e.g. `USB\VID_054C&PID_0ECC&REV_0143`). If you have a different version, reports either way are very welcome.
 - Host: Windows 11 (build 26200), Microsoft inbox drivers only (`usbaudio.sys` + `HidUsb`) — Sony's PC app is NOT in the failure path (verified: the freeze reproduces with it killed)
 - Evidence: USB bus captures (USBPcap), ETW audio traces, an `audiodg.exe` hang dump, and controlled A/B experiments. Raw captures available on request (device serial redacted).
 
@@ -91,6 +91,7 @@ Results and costs:
 
 ## Reproduction (for anyone who wants to verify)
 
+0. Check your firmware version first (see the `REV_xxxx` note at the top). Everything below was verified on **1.43**; a different version might not reproduce, and knowing which versions do or don't is valuable data in itself.
 1. Play continuous audio through the PS Link adapter (any mode; WASAPI exclusive makes the death legible as a clean player error).
 2. Press volume +/− on the headset repeatedly (every ~10 s). Typical time-to-freeze here: under 3 minutes.
 3. For wire-level proof: capture with USBPcap on the adapter's root hub while doing (2); filter the adapter's device address; observe `0xC0000012` completions (256 bytes) on EP 0x81 at each press, and correlate the audio death with one of them. (Note: USBPcap did not capture isochronous packets on my system — not needed; the babble + pipe-reset sequence and the timing correlation are visible regardless.)
