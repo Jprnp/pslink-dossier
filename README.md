@@ -15,6 +15,7 @@
 
 - Device: PlayStation Link USB adapter, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (`REV_0143`, latest at time of writing). **Every finding in this document was captured on firmware 1.43 specifically** — other versions may or may not behave the same. To check yours: Device Manager → the adapter's "PlayStation Link" entry → Properties → Details → Hardware Ids → the `REV_xxxx` suffix is the firmware (e.g. `USB\VID_054C&PID_0ECC&REV_0143`). If you have a different version, reports either way are very welcome.
 - Host: Windows 11 (build 26200), Microsoft inbox drivers only (`usbaudio.sys` + `HidUsb`) — Sony's PC app is NOT in the failure path (verified: the freeze reproduces with it killed)
+- Reproduced on **two different Windows laptops** (different hardware), which rules out a single flaky PC or USB controller as the cause. The detailed bus-level captures in this document were taken on one of them.
 - Evidence: USB bus captures (USBPcap), ETW audio traces, an `audiodg.exe` hang dump, and controlled A/B experiments. Raw captures available on request (device serial redacted).
 
 > **Note on PlayStation support:** I contacted PlayStation support about these freezes long before any of this analysis existed. The case was dismissed as *"a Windows issue"* and support was denied — no escalation path was offered. Everything below exists because that door was closed. As the captures show, it is not a Windows issue: Windows is the side detecting and correctly recovering from the device's protocol violation.
@@ -44,6 +45,8 @@ interrupt IN completion, EP 0x81, length=256, USBD_STATUS = 0xC0000012 (BABBLE_D
 
 I captured this identical sequence **9 times in one session** — once per button press / slider move, deterministically.
 
+A note for anyone about to say "babble is usually an electrical/cabling/host-controller fault, not the device": here it is not. It is **deterministic** (one per state-change event, never at random), the reported length is **exactly 4× the device's own declared report size** (256 = 4 × 64) rather than a garbled or truncated length, and the payload is **four clean, aligned copies of report 0xB0**, not corrupted data. Electrical babble does not produce four byte-perfect repetitions of a specific HID report on cue. This is the firmware deliberately emitting an oversized transfer.
+
 **Why it kills audio:** when no audio is streaming, the abort/reset recovery is harmless (all 9 instances above had no audible effect — the audio stream was closed at the time). But when the isochronous audio stream **is** active on the same Full-Speed device, the babble recovery disrupts the device's USB service and the audio stream stops completing:
 
 - In WASAPI **exclusive** mode (audio engine bypassed): the player dies with *"Unrecoverable playback error: Waiting for hardware timed out"* — I captured a babble event at the **exact second** of the button press that killed the stream, followed ~2 s later by the stream teardown (`SET_INTERFACE alt 0`). The Windows glitch-event channel logged **zero** events — proving the failure happens below the audio engine.
@@ -56,6 +59,17 @@ This also explains the "spontaneous" freezes (the device occasionally updates it
 Secondary spec violation, for completeness: the adapter's isochronous audio OUT endpoint is declared **asynchronous** but provides **no feedback endpoint whatsoever** (neither explicit nor implicit; `bSynchAddress = 0`), which USB 2.0 §5.12.4.2 requires for async sinks. Not the trigger here, but indicative of the firmware's USB compliance level.
 
 **Fault attribution:** the device violates the spec; Windows detects the violation and recovers the pipe by the book. The only thing arguably on Microsoft's side is severity — the glitch storm escalating to an `audiodg` deadlock instead of a graceful stream restart. The firmware was presumably designed against Sony's own host stack (PS5 / PlayStation Portal), where nobody enforces the HID declaration — on Windows, the inbox class driver does.
+
+## Limits of this analysis (what I did NOT prove)
+
+In the interest of honesty, and so nobody has to point these out for me:
+
+- **The internal causal link is inferred, not captured.** I proved that the babble and the audio death are tightly correlated in time, and that removing the HID interface removes the freeze. I did **not** capture the exact mechanism *inside* the drivers by which the interrupt-pipe error recovery disrupts the isochronous audio pipe — that step is a reasoned inference from the timing, the error sequence, and the A/B result. It is also possible (though I consider it less likely) that the babble and the stall are two symptoms of one deeper device fault rather than one causing the other. Either way, the practical conclusion holds: no HID polling, no freeze.
+- **USBPcap captured no isochronous packets on this system.** So I could not directly watch the audio stream's timing degrade on the wire; the audio-side evidence is from ETW (the KS glitch signature) and the player-level failure, correlated by timestamp with the babble. A hardware USB analyzer would settle the internal mechanism definitively.
+- **Fault is shared, not 100% Sony.** The device violates the spec and is the root trigger, but a case can be made that Windows' class drivers could isolate a HID-endpoint error from an unrelated audio function on the same composite device more gracefully. I attribute the *trigger* to Sony's firmware and the *severity* (full audiodg deadlock vs. a brief stream restart) partly to how Windows handles it.
+- **Sample scope.** One headset unit, firmware 1.43, two laptops, one investigator. The spec violations are inherent to the device's descriptors (independent of my machines), but I have not tested multiple headset units or firmware versions. Independent reproduction — especially on other firmware — is exactly what would strengthen or bound this.
+
+None of these weaken the headline finding or the workaround. They mark the boundary between what is captured fact and what is reasoned from it.
 
 ## Why the buttons still work without any of this
 

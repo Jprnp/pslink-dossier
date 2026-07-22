@@ -15,6 +15,7 @@
 
 - Dispositivo: adaptador USB PlayStation Link, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (`REV_0143`, o mais recente até a data). **Todos os achados deste documento foram capturados especificamente no firmware 1.43** — outras versões podem ou não se comportar igual. Pra conferir o seu: Gerenciador de Dispositivos → entrada "PlayStation Link" do adaptador → Propriedades → Detalhes → IDs de Hardware → o sufixo `REV_xxxx` é o firmware (ex.: `USB\VID_054C&PID_0ECC&REV_0143`). Se o seu for outra versão, relatos em qualquer direção são muito bem-vindos.
 - Host: Windows 11 (build 26200), somente drivers inbox da Microsoft (`usbaudio.sys` + `HidUsb`) — o app da Sony pra PC NÃO participa da falha (verificado: o freeze reproduz com ele morto)
+- Reproduzido em **dois laptops Windows diferentes** (hardwares distintos), o que descarta um único PC ou controlador USB defeituoso como causa. As capturas detalhadas de barramento deste documento foram feitas em um deles.
 - Evidência: capturas de barramento USB (USBPcap), traces ETW de áudio, dump do `audiodg.exe` travado e experimentos A/B controlados. Capturas cruas disponíveis a quem pedir (serial do device redigido).
 
 > **Nota sobre o suporte PlayStation:** eu contatei o suporte da PlayStation sobre esses travamentos muito antes de qualquer análise daqui existir. O caso foi descartado como *"um problema do Windows"* e o suporte foi negado — nenhum caminho de escalonamento foi oferecido. Tudo abaixo existe porque essa porta se fechou. Como as capturas mostram, não é um problema do Windows: o Windows é o lado que detecta e recupera corretamente a violação de protocolo do dispositivo.
@@ -44,6 +45,8 @@ completion do interrupt IN, EP 0x81, tamanho=256, USBD_STATUS = 0xC0000012 (BABB
 
 Capturei essa sequência idêntica **9 vezes numa única sessão** — uma por aperto de botão / movimento de slider, deterministicamente.
 
+Uma nota pra quem vai dizer "babble costuma ser falha elétrica/de cabo/do controlador do host, não do device": aqui não é. É **determinístico** (um por evento de mudança de estado, nunca aleatório), o tamanho reportado é **exatamente 4× o tamanho de report que o próprio device declara** (256 = 4 × 64), e não um comprimento truncado ou lixo, e o payload são **quatro cópias limpas e alinhadas do report 0xB0**, não dados corrompidos. Babble elétrico não produz quatro repetições byte-a-byte de um report HID específico sob demanda. Isto é o firmware emitindo deliberadamente uma transferência de tamanho excessivo.
+
 **Por que mata o áudio:** sem áudio tocando, a recuperação (abort/reset) é inofensiva (as 9 ocorrências acima não tiveram efeito audível — o stream de áudio estava fechado na hora). Mas quando o stream isócrono **está** ativo no mesmo dispositivo Full-Speed, a recuperação do babble desorganiza o serviço USB do device e o stream de áudio para de completar:
 
 - Em modo WASAPI **exclusivo** (motor de áudio do Windows fora do caminho): o player morre com *"Unrecoverable playback error: Waiting for hardware timed out"* — capturei um babble no **segundo exato** do aperto de botão que matou o stream, seguido ~2 s depois pelo teardown do stream (`SET_INTERFACE alt 0`). O canal de eventos de glitch do Windows registrou **zero** eventos — provando que a falha acontece abaixo do motor de áudio.
@@ -56,6 +59,17 @@ Isso também explica os travamentos "espontâneos" (o device atualiza o report d
 Violação de spec secundária, por completude: o endpoint isócrono de SAÍDA de áudio é declarado **assíncrono** mas não fornece **nenhum endpoint de feedback** (nem explícito, nem implícito; `bSynchAddress = 0`), que a USB 2.0 §5.12.4.2 exige para sinks assíncronos. Não é o gatilho aqui, mas indica o nível de conformidade USB do firmware.
 
 **Atribuição de culpa:** o dispositivo viola a spec; o Windows detecta a violação e recupera o pipe conforme o manual. A única coisa discutivelmente do lado da Microsoft é a severidade — a tempestade de glitches escalar pra deadlock do `audiodg` em vez de um restart gracioso do stream. O firmware presumivelmente foi projetado contra o host stack da própria Sony (PS5 / PlayStation Portal), onde ninguém cobra a declaração HID — no Windows, o driver de classe inbox cobra.
+
+## Limites desta análise (o que eu NÃO provei)
+
+Por honestidade, e pra ninguém precisar apontar isso por mim:
+
+- **O elo causal interno é inferido, não capturado.** Provei que o babble e a morte do áudio são fortemente correlacionados no tempo, e que remover a interface HID remove o freeze. **Não** capturei o mecanismo exato *dentro* dos drivers pelo qual a recuperação de erro do pipe interrupt desorganiza o pipe isócrono de áudio — esse passo é uma inferência fundamentada no timing, na sequência de erro e no resultado do A/B. Também é possível (embora eu considere menos provável) que o babble e o travamento sejam dois sintomas de uma falha mais profunda do device, em vez de um causar o outro. De todo jeito, a conclusão prática se mantém: sem poll do HID, sem freeze.
+- **O USBPcap não capturou pacotes isócronos neste sistema.** Então não pude observar diretamente a degradação do timing do stream de áudio no fio; a evidência do lado do áudio vem do ETW (a assinatura de glitch do KS) e da falha no nível do player, correlacionadas por timestamp com o babble. Um analisador USB de hardware fecharia o mecanismo interno de forma definitiva.
+- **A culpa é compartilhada, não 100% Sony.** O device viola a spec e é o gatilho raiz, mas dá pra argumentar que os drivers de classe do Windows poderiam isolar um erro de endpoint HID de uma função de áudio não relacionada no mesmo device composto de forma mais graciosa. Atribuo o *gatilho* ao firmware da Sony e a *severidade* (deadlock completo do audiodg vs. um breve restart de stream) em parte a como o Windows lida com ele.
+- **Escopo da amostra.** Uma unidade de headset, firmware 1.43, dois laptops, um investigador. As violações de spec são inerentes aos descriptors do device (independentes das minhas máquinas), mas não testei múltiplas unidades de headset nem versões de firmware. Reprodução independente — especialmente em outro firmware — é exatamente o que reforçaria ou delimitaria isto.
+
+Nenhum destes enfraquece o achado principal nem o workaround. Eles marcam a fronteira entre o que é fato capturado e o que é raciocinado a partir dele.
 
 ## Por que os botões continuam funcionando sem nada disso
 
