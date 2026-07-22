@@ -11,7 +11,7 @@
 >
 > The evidence was sitting on the wire, available to anyone with the right tools. It just needed someone willing to keep asking.
 
-**TL;DR:** If your PULSE Elite / PULSE Explore headset (via the PS Link USB adapter) randomly kills ALL Windows audio — especially when changing volume — it is not your drivers, not Realtek, not Windows. The adapter's firmware violates the USB spec: it transmits **256-byte bursts on an interrupt endpoint it declared as 64-byte max**. Windows detects this as **babble** (`USBD_STATUS_BABBLE_DETECTED`), resets the pipe, and when audio is streaming, that error recovery takes the audio stream down with it — cascading into a full `audiodg.exe` lockup. **Workaround below (no software needed) — audio becomes stable and the volume buttons keep working.**
+**TL;DR:** If your PULSE Elite / PULSE Explore headset (via the PS Link USB adapter) randomly kills ALL Windows audio — especially when changing volume — it is not your drivers, not Realtek, not Windows. The adapter's firmware violates the USB spec: it transmits **256-byte bursts on an interrupt endpoint it declared as 64-byte max**. Windows detects this as **babble** (`USBD_STATUS_BABBLE_DETECTED`), resets the pipe, and when audio is streaming, that error recovery takes the audio stream down with it — cascading into a full `audiodg.exe` lockup. **Quick workaround below (no software needed) — audio becomes stable and the volume buttons keep working.** A free, open-source app that fixes it *completely* — no freeze **and** every feature preserved (auto-sync, sidetone, EQ, mic-mute, volume, battery) — is now available too: see [**The complete fix**](#the-complete-fix-open-source-app).
 
 - Device: PlayStation Link USB adapter, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (`REV_0143`, latest at time of writing). **Every finding in this document was captured on firmware 1.43 specifically** — other versions may or may not behave the same. To check yours: Device Manager → the adapter's "PlayStation Link" entry → Properties → Details → Hardware Ids → the `REV_xxxx` suffix is the firmware (e.g. `USB\VID_054C&PID_0ECC&REV_0143`). If you have a different version, reports either way are very welcome.
 - Host: Windows 11 (build 26200), Microsoft inbox drivers only (`usbaudio.sys` + `HidUsb`) — Sony's PC app is NOT in the failure path (verified: the freeze reproduces with it killed)
@@ -102,6 +102,32 @@ Results and costs:
 - Audio keeps working (different interface, untouched). Volume buttons keep working (handled in-headset). The freeze mechanism is physically eliminated.
 - While disabled, Sony's PC app can't see the device (no sidetone/EQ changes, no battery readout, no firmware updates). Re-enable temporarily to change those, then disable again.
 - Survives reboots. A different adapter unit (different serial) needs the disable applied once again.
+- **Caveat found later:** disabling the whole HID interface also stops the ~5 Hz control poll that tells the headset a PC is present. With it disabled, the headset stops auto-syncing when you power it on and eventually powers itself off on a presence timeout. So the bare disable trades the freeze for a connection regression. **The app below avoids this** — it keeps the presence poll while still never opening the babbling endpoint.
+
+## The complete fix (open-source app)
+
+The disable workaround kills the freeze but, as noted, also kills the headset's sense of presence.
+The insight that resolves both: the freeze comes from the **interrupt** endpoint (0x81), while presence
+comes from a **separate** ~5 Hz poll on the **control** endpoint (`GET_REPORT(Feature 0xB0)` on EP0).
+Windows' inbox HID driver couples them — servicing the interface opens the interrupt pipe, and that is
+what lets the babble land.
+
+So decouple them: rebind the adapter's HID interface (MI_03) to **WinUSB** and drive it from a small
+user-space app. WinUSB does not open the interrupt pipe on its own, so the babbling endpoint is **never
+polled** — the freeze is eliminated by construction. The app runs the same ~5 Hz control poll itself, so
+**presence is preserved** and the headset auto-syncs normally. Every control was re-implemented over the
+control endpoint — volume, mic-mute, sidetone, EQ — plus battery and live connection state, several of
+them decoded specifically for this. Same mechanism, stated simply: **keep the control poll, never open
+the interrupt pipe.**
+
+**→ Pulse Elite Companion — https://github.com/Jprnp/pslink-libusb** (open source, MIT; one-click
+installer; a system-tray app in English / Português / Español). It validated the whole mechanism on real
+hardware: freeze eliminated, presence held, all controls working, no vendor software required.
+
+One honest note: Windows x64 refuses to install an unsigned driver package, so the installer generates a
+**self-signed certificate and adds it to the machine's trust store** to install our WinUSB INF — the same
+concession the popular *Zadig* utility makes internally. The repo documents this and how to fully undo it;
+a properly attestation-signed driver is the planned next step.
 
 ## Reproduction (for anyone who wants to verify)
 
@@ -145,6 +171,7 @@ This was not found in an afternoon. The trail, in order — including the wrong 
 5. **Clock-drift hypothesis.** The descriptor dump showed the async audio OUT endpoint has **no feedback endpoint at all** (spec violation) — a structurally guaranteed clock-drift scenario, and for a while the leading theory. It explained the passive freezes and the post-recovery "grace window". It was wrong about the main mechanism, but it motivated the decisive experiment.
 6. **Night of July 21 into the early hours of the 22nd — the decisive night.** WASAPI-exclusive playback (audio engine bypassed) died on a volume press within a minute — with the Windows glitch channel **completely silent**. Bus capture of the next kill: `BABBLE_DETECTED` on EP 0x81 at the exact second of the fatal press. Re-analysis of the previous day's capture: the same babble + abort/reset sequence at **every** button/slider event — harmless then, because no audio was streaming. Final confirmation: with the HID interface disabled (interrupt pipe never polled → babble physically impossible), button-hammering could no longer kill audio — and the volume buttons kept working, revealing they are processed inside the headset all along.
 7. **Grace-window explained:** after each crash the babbled pipe stays down until the HID driver reopens it; while it is down, no IN tokens → no babble possible → buttons "safe" for a few seconds. Every observed behavior now has one mechanism.
+8. **July 22 — from diagnosis to cure.** Turned the finding into a working product. Confirmed the missing piece — that presence rides on the control poll, not the interrupt pipe — by cutting the bare disable and watching the headset drop off. Then rebound MI_03 to WinUSB, ran the control poll from user space, and never opened the interrupt pipe: freeze gone, presence kept. Decoded the remaining host→device controls over the control endpoint by capturing Sony's app and probing with read-back verification — volume (`0xD0` mask `0x02`), mic-mute (`0xD0` mask `0x01`), battery (report `0x82`, byte on a 0–15 scale), connection state (report `0xB0` byte 39 bit0). Prototyped and validated every step in Python on real hardware, then built a C#/.NET tray app around it. Open-sourced as *Pulse Elite Companion* (link above).
 
 Tools: USBPcap + Wireshark, UsbTreeView, Windows ETW (`Microsoft-Windows-Audio/GlitchDetection`), WinDbg (dump analysis), Python (custom pcap/USBPcap parsers, HID enumeration and access-testing via ctypes, Core Audio monitoring via pycaw).
 
