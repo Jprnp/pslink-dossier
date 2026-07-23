@@ -13,12 +13,32 @@
 
 **TL;DR:** Se o seu headset PULSE Elite / PULSE Explore (via adaptador USB PS Link) mata TODO o áudio do Windows aleatoriamente — principalmente ao mudar o volume — não é seu driver, não é a Realtek, não é o Windows. O firmware do adaptador viola a spec USB: transmite **rajadas de 256 bytes num endpoint interrupt que ele mesmo declarou como máximo de 64 bytes**. O Windows detecta isso como **babble** (`USBD_STATUS_BABBLE_DETECTED`), reseta o pipe, e quando há áudio tocando, essa recuperação de erro derruba o stream junto — escalando até o travamento completo do `audiodg.exe`. **Workaround rápido abaixo (sem software nenhum) — o áudio fica estável e os botões de volume continuam funcionando.** Um app grátis e open-source que corrige *por completo* — sem freeze **e** com todas as funções preservadas (auto-sync, sidetone, EQ, mute do mic, volume, bateria) — também já está disponível: veja [**A correção completa**](#a-correção-completa-app-open-source).
 
-- Dispositivo: adaptador USB PlayStation Link, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (`REV_0143`, o mais recente até a data). **Todos os achados deste documento foram capturados especificamente no firmware 1.43** — outras versões podem ou não se comportar igual. Pra conferir o seu: Gerenciador de Dispositivos → entrada "PlayStation Link" do adaptador → Propriedades → Detalhes → IDs de Hardware → o sufixo `REV_xxxx` é o firmware (ex.: `USB\VID_054C&PID_0ECC&REV_0143`). Se o seu for outra versão, relatos em qualquer direção são muito bem-vindos.
+- Dispositivo: adaptador USB PlayStation Link, modelo **CFI-ZWA2**, `VID_054C PID_0ECC`, firmware/bcdDevice **1.43** (`REV_0143`, o mais recente até a data). **Todos os achados deste documento foram capturados especificamente neste modelo.** Um modelo mais novo, **ZFI-ZWA3** (`PID_0FA3`), **não** apresenta o freeze — ver [Duas revisões de hardware](#duas-revisões-de-hardware--a-mais-nova-não-tem-o-bug). Outras versões/modelos podem ou não se comportar igual. Pra conferir o seu: Gerenciador de Dispositivos → entrada "PlayStation Link" do adaptador → Propriedades → Detalhes → IDs de Hardware → o sufixo `REV_xxxx` é o firmware (ex.: `USB\VID_054C&PID_0ECC&REV_0143`). Se o seu for outra versão, relatos em qualquer direção são muito bem-vindos.
 - Host: Windows 11 (build 26200), somente drivers inbox da Microsoft (`usbaudio.sys` + `HidUsb`) — o app da Sony pra PC NÃO participa da falha (verificado: o freeze reproduz com ele morto)
 - Reproduzido em **dois laptops Windows diferentes** (hardwares distintos), o que descarta um único PC ou controlador USB defeituoso como causa. As capturas detalhadas de barramento deste documento foram feitas em um deles.
 - Evidência: capturas de barramento USB (USBPcap), traces ETW de áudio, dump do `audiodg.exe` travado e experimentos A/B controlados. Capturas cruas disponíveis a quem pedir (serial do device redigido).
 
 > **Nota sobre o suporte PlayStation:** eu contatei o suporte da PlayStation sobre esses travamentos muito antes de qualquer análise daqui existir. O caso foi descartado como *"um problema do Windows"* e o suporte foi negado — nenhum caminho de escalonamento foi oferecido. Tudo abaixo existe porque essa porta se fechou. Como as capturas mostram, não é um problema do Windows: o Windows é o lado que detecta e recupera corretamente a violação de protocolo do dispositivo.
+
+---
+
+## Duas revisões de hardware — a mais nova não tem o bug
+
+Existem (pelo menos) duas revisões de hardware do adaptador USB PS Link, e elas se comportam diferente no Windows:
+
+| Modelo | ID USB | Bug do freeze |
+|---|---|---|
+| **CFI-ZWA2** (mais antigo) | `VID_054C PID_0ECC` | **Sim** — tudo neste documento |
+| **ZFI-ZWA3** (mais novo) | `VID_054C PID_0FA3` | **Não** — não reproduziu nos testes |
+
+O **ZFI-ZWA3** (`PID_0FA3`) mais novo foi pareado ao mesmo headset e submetido à mesma martelada de botões + playback WASAPI exclusivo que trava o **CFI-ZWA2** (`PID_0ECC`) mais antigo em minutos, de forma confiável. Ele **não** travou. A interface HID dele inclusive enumera com um layout de coleção diferente (a interface MI_03 expõe COL01/02/03 em vez da COL04 única do modelo antigo) — ou seja, um design de HID/firmware revisado, não só um relabel. Como o babble é uma violação USB do *device*, visível nos descriptors do *próprio* adaptador, um adaptador que não faz babble foi corrigido em **hardware/firmware**, independente de qualquer driver do host.
+
+Duas ressalvas, mantidas honestas:
+
+- **Identifique o hardware corrigido pelo PID / número do modelo, não pela versão de firmware.** Os dois reportam o mesmo `bcdDevice` **1.43** (`REV_0143`), então o REV sozinho **não** distingue o adaptador bugado do corrigido. O que diferencia é o **PID** (`0ECC` vs `0FA3`) e o número do modelo na caixa.
+- **A Sony não documenta nada disso.** A [página do driver PS Link pra PC](https://www.playstation.com/en-us/support/hardware/playstation-link-pc-driver/) lista um único "PlayStation Link USB adapter" genérico — sem números de modelo, sem revisões de hardware, sem nota de que um adaptador mais novo resolve o freeze. Se você vai comprar um adaptador justamente pra fugir desse bug, não há sinal oficial dizendo qual revisão está na caixa.
+
+Escopo, dito na lata: uma unidade de cada modelo, um investigador. Os achados do modelo antigo abaixo seguem inalterados; o resultado do modelo novo é uma única tentativa limpa que não conseguiu reproduzir o freeze. Relatos independentes sobre o `PID_0FA3` são bem-vindos.
 
 ---
 
@@ -67,7 +87,7 @@ Por honestidade, e pra ninguém precisar apontar isso por mim:
 - **O elo causal interno é inferido, não capturado.** Provei que o babble e a morte do áudio são fortemente correlacionados no tempo, e que remover a interface HID remove o freeze. **Não** capturei o mecanismo exato *dentro* dos drivers pelo qual a recuperação de erro do pipe interrupt desorganiza o pipe isócrono de áudio — esse passo é uma inferência fundamentada no timing, na sequência de erro e no resultado do A/B. Também é possível (embora eu considere menos provável) que o babble e o travamento sejam dois sintomas de uma falha mais profunda do device, em vez de um causar o outro. De todo jeito, a conclusão prática se mantém: sem poll do HID, sem freeze.
 - **O USBPcap não capturou pacotes isócronos neste sistema.** Então não pude observar diretamente a degradação do timing do stream de áudio no fio; a evidência do lado do áudio vem do ETW (a assinatura de glitch do KS) e da falha no nível do player, correlacionadas por timestamp com o babble. Um analisador USB de hardware fecharia o mecanismo interno de forma definitiva.
 - **A culpa é compartilhada, não 100% Sony.** O device viola a spec e é o gatilho raiz, mas dá pra argumentar que os drivers de classe do Windows poderiam isolar um erro de endpoint HID de uma função de áudio não relacionada no mesmo device composto de forma mais graciosa. Atribuo o *gatilho* ao firmware da Sony e a *severidade* (deadlock completo do audiodg vs. um breve restart de stream) em parte a como o Windows lida com ele.
-- **Escopo da amostra.** Uma unidade de headset, firmware 1.43, dois laptops, um investigador. As violações de spec são inerentes aos descriptors do device (independentes das minhas máquinas), mas não testei múltiplas unidades de headset nem versões de firmware. Reprodução independente — especialmente em outro firmware — é exatamente o que reforçaria ou delimitaria isto.
+- **Escopo da amostra.** Uma unidade de headset, dois modelos de adaptador (o bugado **CFI-ZWA2** / `PID_0ECC` e o não-bugado **ZFI-ZWA3** / `PID_0FA3` — ver [Duas revisões de hardware](#duas-revisões-de-hardware--a-mais-nova-não-tem-o-bug)), dois laptops, um investigador. As violações de spec são inerentes aos descriptors do CFI-ZWA2 (independentes das minhas máquinas), mas não testei múltiplas unidades do *mesmo* modelo. Reprodução independente — e mais relatos sobre qualquer um dos PIDs — é exatamente o que reforçaria ou delimitaria isto.
 
 Nenhum destes enfraquece o achado principal nem o workaround. Eles marcam a fronteira entre o que é fato capturado e o que é raciocinado a partir dele.
 
